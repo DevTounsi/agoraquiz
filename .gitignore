@@ -1,0 +1,9 @@
+.venv/
+.pw_profile/
+config.json
+dist/
+build/
+*.spec
+__pycache__/
+*.py[cod]
+.DS_Store
