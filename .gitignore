@@ -1,6 +1,7 @@
 .venv/
 .pw_profile/
 config.json
+agora_bot_error.log
 dist/
 build/
 *.spec

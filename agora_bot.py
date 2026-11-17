@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import random
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -66,10 +67,35 @@ LABEL_EFFORT_RE = re.compile(r"\s*\((Low|Medium|High|XHigh|Max)\)\s*$", re.IGNOR
 
 
 def get_app_dir() -> Path:
-    """Retourne le dossier contenant l'exécutable (PyInstaller) ou le script."""
+    """Retourne un dossier accessible en écriture pour config.json et .pw_profile."""
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        exe_dir = Path(sys.executable).resolve().parent
+        try:
+            probe = exe_dir / ".write_test"
+            probe.touch()
+            probe.unlink()
+            return exe_dir
+        except Exception:
+            fallback = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "AgoraQuizBot"
+            fallback.mkdir(parents=True, exist_ok=True)
+            return fallback
     return Path(__file__).resolve().parent
+
+
+def find_agy_bin() -> str | None:
+    """Trouve l'exécutable agy dans le PATH ou les emplacements standards."""
+    found = shutil.which("agy")
+    if found:
+        return found
+    candidates = [
+        Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "agy" / "bin" / "agy.exe",
+        Path.home() / ".local" / "bin" / "agy.exe",
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "agy" / "agy.exe",
+    ]
+    for cand in candidates:
+        if cand.exists():
+            return str(cand)
+    return None
 
 
 def read_config_raw(app_dir: Path) -> dict:
@@ -107,17 +133,21 @@ def load_config(app_dir: Path) -> dict:
     return cfg
 
 
-def fetch_agy_models() -> list[tuple[str, str]]:
-    """Récupère la liste brute des modèles disponibles via `agy models`."""
+def fetch_agy_models() -> tuple[list[tuple[str, str]], str]:
+    """Récupère la liste brute des modèles via `agy models` et un message de diagnostic."""
+    agy_bin = find_agy_bin()
+    if not agy_bin:
+        return list(FALLBACK_MODELS), "ERREUR : CLI 'agy' introuvable sur ce PC (installez agy et connectez-vous)."
+
     try:
         res = subprocess.run(
-            ["agy", "models"],
+            [agy_bin, "models"],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
             creationflags=SUBPROCESS_FLAGS,
-            timeout=10,
+            timeout=12,
         )
         if res.returncode == 0:
             models = []
@@ -129,16 +159,18 @@ def fetch_agy_models() -> list[tuple[str, str]]:
                     if model_id:
                         models.append((model_id, label))
             if models:
-                return models
-    except Exception:
-        pass
-    return list(FALLBACK_MODELS)
+                return models, f"agy prêt ({agy_bin}) — {len(models)} modèles chargés."
+        err = (res.stderr or res.stdout or "").strip()
+        return list(FALLBACK_MODELS), f"ATTENTION : 'agy models' a échoué ({err or 'code ' + str(res.returncode)}). Connectez-vous à agy."
+    except Exception as e:
+        return list(FALLBACK_MODELS), f"ATTENTION : impossible d'exécuter agy ({e})."
 
 
-def fetch_grouped_models() -> list[dict]:
-    """Regroupe les modèles par famille et associe chaque effort à son ID exact."""
+def fetch_grouped_models() -> tuple[list[dict], str]:
+    """Regroupe les modèles par famille et retourne (groupes, diagnostic agy)."""
+    raw_models, status_msg = fetch_agy_models()
     groups: dict[str, dict] = {}
-    for model_id, label in fetch_agy_models():
+    for model_id, label in raw_models:
         eff_match = EFFORT_SUFFIX_RE.search(model_id)
         effort = eff_match.group(1).lower() if eff_match else "default"
         base_id = EFFORT_SUFFIX_RE.sub("", model_id)
@@ -158,7 +190,7 @@ def fetch_grouped_models() -> list[dict]:
         result.append(g)
 
     result.sort(key=lambda g: (0 if g["id"] == DEFAULT_BASE_MODEL else 1, g["label"]))
-    return result
+    return result, status_msg
 
 
 def ensure_logged_in(page, username: str, password: str, log=print) -> None:
@@ -416,7 +448,12 @@ def ask_agy(
         f"Propositions :\n{formatted_options}"
     )
 
-    cmd = ["agy", "-p", prompt, "--model", model, "--disable-slash-commands"]
+    agy_bin = find_agy_bin()
+    if not agy_bin:
+        log("Erreur : 'agy' est introuvable. Installez agy CLI et connectez-vous.")
+        return []
+
+    cmd = [agy_bin, "-p", prompt, "--model", model, "--disable-slash-commands"]
     if effort and effort != "default":
         cmd.extend(["--effort", effort])
 

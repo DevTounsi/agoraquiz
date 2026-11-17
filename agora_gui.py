@@ -1,7 +1,9 @@
+import ctypes
 from pathlib import Path
 import queue
 import sys
 import threading
+import traceback
 import webview
 
 from agora_bot import (
@@ -23,6 +25,24 @@ def get_ui_path() -> str:
     return str(base / "ui" / "index.html")
 
 
+def show_fatal_error(app_dir: Path, err_text: str) -> None:
+    """Écrit l'erreur dans agora_bot_error.log et affiche une boîte de dialogue Windows."""
+    try:
+        (app_dir / "agora_bot_error.log").write_text(err_text, encoding="utf-8")
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"Impossible de démarrer AgoraQuiz Bot :\n\n{err_text[:1000]}",
+                "AgoraQuiz Bot — Erreur",
+                0x10,
+            )
+        except Exception:
+            pass
+
+
 class BotApi:
     """API exposée à l'interface WebView2."""
 
@@ -42,9 +62,12 @@ class BotApi:
         self._log_queue.put(text)
 
     def get_initial_state(self) -> dict:
+        models, agy_status = fetch_grouped_models()
         return {
             "config": read_config_raw(self.app_dir),
-            "models": fetch_grouped_models(),
+            "models": models,
+            "agy_status": agy_status,
+            "data_dir": str(self.app_dir),
             "default_base_model": DEFAULT_BASE_MODEL,
             "default_effort": DEFAULT_EFFORT,
             "default_success_rate": DEFAULT_SUCCESS_RATE,
@@ -54,12 +77,15 @@ class BotApi:
         if self._running:
             return {"ok": False, "error": "Le bot est déjà en cours d'exécution."}
 
-        cfg = {
-            "username": opts.get("username", "").strip(),
-            "password": opts.get("password", ""),
-            "quiz_name": opts.get("quiz_name", "").strip(),
-        }
-        save_config(self.app_dir, cfg)
+        try:
+            cfg = {
+                "username": opts.get("username", "").strip(),
+                "password": opts.get("password", ""),
+                "quiz_name": opts.get("quiz_name", "").strip(),
+            }
+            save_config(self.app_dir, cfg)
+        except Exception as e:
+            return {"ok": False, "error": f"Impossible d'enregistrer la config : {e}"}
 
         while not self._log_queue.empty():
             self._log_queue.get_nowait()
@@ -113,16 +139,20 @@ class BotApi:
 
 
 def main() -> None:
-    api = BotApi()
-    webview.create_window(
-        "AgoraQuiz Bot",
-        url=get_ui_path(),
-        js_api=api,
-        width=840,
-        height=660,
-        min_size=(700, 560),
-    )
-    webview.start()
+    app_dir = get_app_dir()
+    try:
+        api = BotApi()
+        webview.create_window(
+            "AgoraQuiz Bot",
+            url=get_ui_path(),
+            js_api=api,
+            width=840,
+            height=660,
+            min_size=(700, 560),
+        )
+        webview.start()
+    except Exception:
+        show_fatal_error(app_dir, traceback.format_exc())
 
 
 if __name__ == "__main__":

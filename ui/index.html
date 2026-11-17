@@ -285,47 +285,59 @@
         sel.appendChild(opt);
       }
       updateEffortOptions();
+
+      const logs = document.getElementById("logs");
+      if (data.agy_status) {
+        logs.textContent = data.agy_status + "\nDossier config/session : " + (data.data_dir || "") + "\n";
+      }
     }
 
     async function startBot() {
-      const effSel = document.getElementById("effortSelect");
-      const selectedOpt = effSel.options[effSel.selectedIndex];
-      const fullModelId = selectedOpt ? selectedOpt.dataset.modelId : "gemini-4-hydrogen-low";
+      try {
+        const effSel = document.getElementById("effortSelect");
+        const selectedOpt = effSel.options[effSel.selectedIndex];
+        const fullModelId = selectedOpt ? selectedOpt.dataset.modelId : "gemini-4-hydrogen-low";
 
-      const payload = {
-        username: document.getElementById("username").value.trim(),
-        password: document.getElementById("password").value,
-        mode: document.getElementById("modeSelect").value,
-        quiz_name: document.getElementById("quizName").value.trim(),
-        model: fullModelId,
-        effort: effSel.value || "low",
-        success_rate: parseInt(document.getElementById("successRate").value || "80", 10),
-        show_browser: document.getElementById("showBrowser").checked,
-        count: parseInt(document.getElementById("quizCount").value || "1", 10),
-      };
+        const payload = {
+          username: document.getElementById("username").value.trim(),
+          password: document.getElementById("password").value,
+          mode: document.getElementById("modeSelect").value,
+          quiz_name: document.getElementById("quizName").value.trim(),
+          model: fullModelId,
+          effort: effSel.value || "low",
+          success_rate: parseInt(document.getElementById("successRate").value || "80", 10),
+          show_browser: document.getElementById("showBrowser").checked,
+          count: parseInt(document.getElementById("quizCount").value || "1", 10),
+        };
 
-      if (!payload.username || !payload.password) {
-        alert("Renseignez votre identifiant et votre mot de passe.");
-        return;
-      }
+        if (!payload.username || !payload.password) {
+          alert("Renseignez votre identifiant et votre mot de passe.");
+          return;
+        }
 
-      document.getElementById("doneBanner").style.display = "none";
-      document.getElementById("logs").textContent = "";
-      document.getElementById("startBtn").disabled = true;
-      document.getElementById("stopBtn").disabled = false;
-      setStatus("running", "En cours...");
+        document.getElementById("doneBanner").style.display = "none";
+        document.getElementById("logs").textContent = "Démarrage...\n";
+        document.getElementById("startBtn").disabled = true;
+        document.getElementById("stopBtn").disabled = false;
+        setStatus("running", "En cours...");
 
-      const res = await window.pywebview.api.start(payload);
-      if (!res.ok) {
-        alert(res.error || "Impossible de démarrer.");
+        const res = await window.pywebview.api.start(payload);
+        if (!res.ok) {
+          document.getElementById("logs").textContent += "Erreur : " + (res.error || "Impossible de démarrer.") + "\n";
+          document.getElementById("startBtn").disabled = false;
+          document.getElementById("stopBtn").disabled = true;
+          setStatus("error", "Erreur");
+          return;
+        }
+
+        if (pollTimer) clearInterval(pollTimer);
+        pollTimer = setInterval(pollLogs, 400);
+      } catch (err) {
+        document.getElementById("logs").textContent += "Erreur JS : " + err + "\n";
         document.getElementById("startBtn").disabled = false;
         document.getElementById("stopBtn").disabled = true;
         setStatus("error", "Erreur");
-        return;
       }
-
-      if (pollTimer) clearInterval(pollTimer);
-      pollTimer = setInterval(pollLogs, 400);
     }
 
     async function stopBot() {
