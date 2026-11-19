@@ -24,6 +24,7 @@ Application Windows autonome avec interface graphique (Edge WebView2) pour autom
 - **Connexion automatique** sur `/auth` et conservation de la session dans `.pw_profile/`.
 - **Mode Aventure** : ouvre `/play/adventure`, repère le nœud `CONTINUER` ou `COMMENCER ICI`, vérifie les tickets disponibles et résout les questions.
 - **Mode Duels (Affrontements)** : ouvre `/play/battle`, reprend une manche en cours (`Jouer`) ou cherche un adversaire, sélectionne le thème puis résout la manche jusqu'à l'écran de fin.
+- **Mode Défis solo** : ouvre `/play/solo`, lance un défi solo, sélectionne le thème et le type de défi (`Premier à 10 bonnes réponses`, `Contre la montre` ou `Mode survie`) et résout les questions.
 - **Taux de convergence configurable** : régule dynamiquement les bonnes réponses et erreurs volontaires pour converger vers le pourcentage choisi (80 % par défaut).
 
 ## Développement & compilation depuis les sources

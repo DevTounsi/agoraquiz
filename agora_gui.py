@@ -1,16 +1,23 @@
 import ctypes
+import json
+import os
 from pathlib import Path
 import queue
+import re
+import subprocess
 import sys
 import threading
 import traceback
+import urllib.request
 import webview
 
 from agora_bot import (
+    APP_VERSION,
     DEFAULT_BASE_MODEL,
     DEFAULT_EFFORT,
     DEFAULT_MODEL,
     DEFAULT_SUCCESS_RATE,
+    GITHUB_REPO,
     fetch_grouped_models,
     get_app_dir,
     read_config_raw,
@@ -23,6 +30,12 @@ def get_ui_path() -> str:
     """Retourne le chemin vers ui/index.html (PyInstaller ou source)."""
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return str(base / "ui" / "index.html")
+
+
+def parse_version(tag: str) -> tuple[int, ...]:
+    """Convertit 'v1.1.0' en tuple (1, 1, 0) pour comparaison."""
+    nums = [int(x) for x in re.findall(r"\d+", tag or "")]
+    return tuple(nums) if nums else (0,)
 
 
 def show_fatal_error(app_dir: Path, err_text: str) -> None:
@@ -64,6 +77,8 @@ class BotApi:
     def get_initial_state(self) -> dict:
         models, agy_status = fetch_grouped_models()
         return {
+            "version": APP_VERSION,
+            "is_frozen": getattr(sys, "frozen", False),
             "config": read_config_raw(self.app_dir),
             "models": models,
             "agy_status": agy_status,
@@ -72,6 +87,79 @@ class BotApi:
             "default_effort": DEFAULT_EFFORT,
             "default_success_rate": DEFAULT_SUCCESS_RATE,
         }
+
+    def check_update(self) -> dict:
+        """Vérifie si une release plus récente existe sur GitHub."""
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "AgoraQuizBot"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            tag = data.get("tag_name", "")
+            assets = data.get("assets", [])
+            exe_url = ""
+            for asset in assets:
+                if asset.get("name", "").lower().endswith(".exe"):
+                    exe_url = asset.get("browser_download_url", "")
+                    break
+            available = parse_version(tag) > parse_version(APP_VERSION) and bool(exe_url)
+            return {
+                "ok": True,
+                "available": available,
+                "current": APP_VERSION,
+                "latest": tag or f"v{APP_VERSION}",
+                "download_url": exe_url,
+                "release_url": data.get("html_url", ""),
+            }
+        except Exception as e:
+            return {"ok": False, "available": False, "current": APP_VERSION, "error": str(e)}
+
+    def apply_update(self, download_url: str) -> dict:
+        """Télécharge le nouvel .exe et lance son remplacement automatique."""
+        if not getattr(sys, "frozen", False):
+            return {
+                "ok": False,
+                "error": "Mise à jour automatique disponible uniquement depuis AgoraQuizBot.exe (utilisez git pull en mode script).",
+            }
+        if not download_url:
+            return {"ok": False, "error": "URL de téléchargement manquante."}
+
+        exe_path = Path(sys.executable).resolve()
+        new_path = exe_path.with_name(exe_path.stem + ".new.exe")
+        bat_path = exe_path.with_name("_update_agora.bat")
+
+        try:
+            req = urllib.request.Request(download_url, headers={"User-Agent": "AgoraQuizBot"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                payload = resp.read()
+            if len(payload) < 1_000_000 or not payload.startswith(b"MZ"):
+                return {"ok": False, "error": "Fichier téléchargé invalide."}
+            new_path.write_bytes(payload)
+
+            bat_content = (
+                "@echo off\r\n"
+                "timeout /t 2 /nobreak >nul\r\n"
+                f'move /y "{new_path}" "{exe_path}" >nul\r\n'
+                f'start "" "{exe_path}"\r\n'
+                'del "%~f0"\r\n'
+            )
+            bat_path.write_text(bat_content, encoding="utf-8")
+
+            flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            subprocess.Popen(["cmd.exe", "/c", str(bat_path)], creationflags=flags)
+
+            def close_soon() -> None:
+                try:
+                    for w in webview.windows:
+                        w.destroy()
+                except Exception:
+                    pass
+                os._exit(0)
+
+            threading.Timer(0.4, close_soon).start()
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     def start(self, opts: dict) -> dict:
         if self._running:
@@ -106,6 +194,7 @@ class BotApi:
                     headless=not bool(opts.get("show_browser", True)),
                     count=max(0, int(opts.get("count", 1))),
                     quiz_name=cfg["quiz_name"],
+                    solo_type=opts.get("solo_type", "Premier à 10"),
                     success_rate=int(opts.get("success_rate", DEFAULT_SUCCESS_RATE)),
                     app_dir=self.app_dir,
                     log=self._log,

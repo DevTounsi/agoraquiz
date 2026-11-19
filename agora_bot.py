@@ -19,6 +19,8 @@ if getattr(sys, "frozen", False) and "PLAYWRIGHT_BROWSERS_PATH" not in os.enviro
 from playwright.sync_api import sync_playwright
 
 BASE_URL = "https://play.agoraquiz.education"
+APP_VERSION = "1.1.0"
+GITHUB_REPO = "DevTounsi/agoraquiz"
 DEFAULT_BASE_MODEL = "gemini-4-hydrogen"
 DEFAULT_MODEL = "gemini-4-hydrogen-low"
 DEFAULT_EFFORT = "low"
@@ -44,7 +46,7 @@ FALLBACK_MODELS = [
 ]
 
 QUESTION_SELECTOR = "#root div.max-w-2xl.text-balance.text-center"
-OPTION_SELECTOR = "#root button[role='button'][type='button']"
+OPTION_SELECTOR = "#root button[role='button'][type='button']:not([disabled])"
 EXPECTED_RE = re.compile(r"(\d+)\s+réponses?\s+attendues?", re.IGNORECASE)
 NEXT_BUTTON_NAMES = (
     "Continuer",
@@ -142,6 +144,7 @@ def fetch_agy_models() -> tuple[list[tuple[str, str]], str]:
     try:
         res = subprocess.run(
             [agy_bin, "models"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -193,9 +196,17 @@ def fetch_grouped_models() -> tuple[list[dict], str]:
     return result, status_msg
 
 
+def ensure_on_play_home(page, log=print) -> None:
+    """Force la navigation vers la page d'accueil des modes (/play)."""
+    if page.url.rstrip("/") != f"{BASE_URL}/play":
+        page.goto(f"{BASE_URL}/play", wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2500)
+    log_ticket_status(page, log=log)
+
+
 def ensure_logged_in(page, username: str, password: str, log=print) -> None:
-    """Se connecte automatiquement sur /auth si la session n'est pas active."""
-    page.goto(f"{BASE_URL}/auth", wait_until="domcontentloaded", timeout=30000)
+    """Se connecte automatiquement sur /auth si la session n'est pas active puis va sur /play."""
+    page.goto(f"{BASE_URL}/play", wait_until="domcontentloaded", timeout=30000)
     page.wait_for_timeout(2500)
 
     if "/auth" in page.url:
@@ -216,6 +227,10 @@ def ensure_logged_in(page, username: str, password: str, log=print) -> None:
     else:
         log(f"Session déjà active ({page.url})")
 
+    if page.url.rstrip("/") != f"{BASE_URL}/play":
+        page.goto(f"{BASE_URL}/play", wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2500)
+
 
 def log_ticket_status(page, log=print) -> None:
     """Affiche les compteurs de tickets lus sur /play s'ils sont visibles."""
@@ -225,12 +240,15 @@ def log_ticket_status(page, log=print) -> None:
         return
     adv = re.search(r"Tickets aventure\s*:\s*(\d+)", text, re.IGNORECASE)
     duel = re.search(r"Tickets affrontements\s*:\s*(\d+)", text, re.IGNORECASE)
-    if adv or duel:
+    solo = re.search(r"Tickets défis solo\s*:\s*(\d+)", text, re.IGNORECASE)
+    if adv or duel or solo:
         parts = []
         if adv:
             parts.append(f"Aventure: {adv.group(1)}")
         if duel:
             parts.append(f"Affrontements: {duel.group(1)}")
+        if solo:
+            parts.append(f"Solo: {solo.group(1)}")
         log("Tickets disponibles -> " + " | ".join(parts))
 
 
@@ -275,11 +293,7 @@ def pick_wrong_indices(options: list[str], good_indices: list[int], expected_cou
 def select_and_start_adventure(page, quiz_name: str = "", log=print) -> bool:
     """Navigue depuis /play vers Aventure, sélectionne un quiz et clique sur Commencer."""
     if "/play/adventure" not in page.url:
-        if "/play" not in page.url:
-            page.goto(f"{BASE_URL}/play", wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(2500)
-
-        log_ticket_status(page, log=log)
+        ensure_on_play_home(page, log=log)
         log("Ouverture du mode Aventure...")
         page.get_by_text("Aventure", exact=True).first.click(timeout=15000)
         page.wait_for_timeout(2500)
@@ -357,11 +371,7 @@ def select_and_start_adventure(page, quiz_name: str = "", log=print) -> bool:
 def select_and_start_duel(page, log=print) -> bool:
     """Navigue depuis /play vers Affrontements et lance ou rejoint un duel."""
     if "/play/battle" not in page.url:
-        if "/play" not in page.url:
-            page.goto(f"{BASE_URL}/play", wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(2500)
-
-        log_ticket_status(page, log=log)
+        ensure_on_play_home(page, log=log)
         log("Ouverture du mode Affrontements (Duels)...")
         page.get_by_text("Affrontements", exact=True).first.click(timeout=15000)
         page.wait_for_timeout(2500)
@@ -396,15 +406,43 @@ def select_and_start_duel(page, log=print) -> bool:
     return True
 
 
+def select_and_start_solo(page, log=print) -> bool:
+    """Navigue depuis /play vers Défis solo et lance un défi solo."""
+    if "/play/solo" not in page.url:
+        ensure_on_play_home(page, log=log)
+        log("Ouverture du mode Défis solo...")
+        page.get_by_text("Défis solo", exact=True).first.click(timeout=15000)
+        page.wait_for_timeout(2500)
+
+    start_btn = page.locator("button", has_text="Lancer un défi solo").first
+    start_btn.wait_for(state="visible", timeout=10000)
+    if start_btn.is_disabled():
+        log("Bouton 'Lancer un défi solo' désactivé (plus de tickets défis solo ?).")
+        return False
+
+    log("Lancement du défi solo...")
+    start_btn.click()
+
+    for _ in range(30):
+        if "/solo-game/" in page.url:
+            break
+        page.wait_for_timeout(500)
+
+    if "/solo-game/" not in page.url:
+        log("Impossible de démarrer le défi solo (timeout).")
+        return False
+
+    log(f"Défi solo démarré : {page.url}")
+    return True
+
+
 def is_in_game_url(url: str) -> bool:
-    """Indique si l'URL correspond à une partie active (Aventure ou Duel)."""
+    """Indique si l'URL correspond à une partie active (Aventure, Duel ou Solo)."""
     clean = url.rstrip("/")
     return (
-        "/play/adventure" not in clean
-        and "/play/battle" not in clean
-        and "/auth" not in clean
-        and clean != f"{BASE_URL}/play"
-        and clean != BASE_URL
+        "/adventure-game/" in clean
+        or "/battle-game/" in clean
+        or "/solo-game/" in clean
     )
 
 
@@ -457,15 +495,20 @@ def ask_agy(
     if effort and effort != "default":
         cmd.extend(["--effort", effort])
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=SUBPROCESS_FLAGS,
-        timeout=60,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=SUBPROCESS_FLAGS,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        log("Erreur agy : délai dépassé (60s).")
+        return []
 
     if result.returncode != 0:
         log(f"Erreur agy : {result.stderr.strip()}")
@@ -510,31 +553,55 @@ def detect_end_screen(page) -> str | None:
     return None
 
 
-def handle_duel_theme_choice(page, option_locs, quiz_name: str = "", log=print) -> bool:
-    """Sélectionne un thème si l'écran 'Choisir un thème' est affiché en Duel."""
+def handle_pregame_choice(
+    page,
+    option_locs,
+    quiz_name: str = "",
+    solo_type: str = "Premier à 10",
+    log=print,
+) -> bool:
+    """Gère les écrans 'Choisir un thème' (Duel/Solo) et 'Choisir un mode de jeu' (Solo)."""
     try:
         root_text = page.locator("#root").inner_text(timeout=800)
     except Exception:
         return False
 
-    if "choisir un thème" not in root_text.lower() or option_locs.count() == 0:
+    lower = root_text.lower()
+    if option_locs.count() == 0:
         return False
 
-    chosen_idx = 0
-    if quiz_name:
-        needle = quiz_name.lower()
+    if "choisir un thème" in lower:
+        chosen_idx = 0
+        if quiz_name:
+            needle = quiz_name.lower()
+            for i in range(option_locs.count()):
+                if needle in option_locs.nth(i).inner_text().lower():
+                    chosen_idx = i
+                    break
+        theme_text = option_locs.nth(chosen_idx).inner_text().strip()
+        log(f"Sélection du thème : {theme_text}")
+        option_locs.nth(chosen_idx).click()
+        time.sleep(0.4)
+        try_click_next(page)
+        time.sleep(1.0)
+        return True
+
+    if "choisir un mode de jeu" in lower:
+        chosen_idx = 0
+        needle = (solo_type or "Premier à 10").lower()
         for i in range(option_locs.count()):
             if needle in option_locs.nth(i).inner_text().lower():
                 chosen_idx = i
                 break
+        mode_text = option_locs.nth(chosen_idx).inner_text().strip()
+        log(f"Sélection du défi solo : {mode_text}")
+        option_locs.nth(chosen_idx).click()
+        time.sleep(0.4)
+        try_click_next(page)
+        time.sleep(1.0)
+        return True
 
-    theme_text = option_locs.nth(chosen_idx).inner_text().strip()
-    log(f"Sélection du thème de duel : {theme_text}")
-    option_locs.nth(chosen_idx).click()
-    time.sleep(0.4)
-    try_click_next(page)
-    time.sleep(1.0)
-    return True
+    return False
 
 
 def solve_current_quiz(
@@ -543,6 +610,7 @@ def solve_current_quiz(
     effort: str,
     mode: str = "adventure",
     quiz_name: str = "",
+    solo_type: str = "Premier à 10",
     success_rate: int = DEFAULT_SUCCESS_RATE,
     tracker: dict | None = None,
     log=print,
@@ -553,6 +621,7 @@ def solve_current_quiz(
         tracker = {"correct": 0, "total": 0}
     last_signature = None
     no_question_ticks = 0
+    idle_ticks = 0
     while is_in_game_url(page.url):
         if stop_event and stop_event.is_set():
             log("Arrêt demandé par l'utilisateur.")
@@ -562,8 +631,11 @@ def solve_current_quiz(
         option_locs = page.locator(OPTION_SELECTOR)
 
         if question_loc.count() == 0 or option_locs.count() == 0:
-            if handle_duel_theme_choice(page, option_locs, quiz_name=quiz_name, log=log):
+            if handle_pregame_choice(
+                page, option_locs, quiz_name=quiz_name, solo_type=solo_type, log=log
+            ):
                 no_question_ticks = 0
+                idle_ticks = 0
                 continue
 
             end_label = detect_end_screen(page)
@@ -572,19 +644,26 @@ def solve_current_quiz(
                 try_click_next(page)
                 time.sleep(0.8)
                 if not is_in_game_url(page.url) or no_question_ticks >= 3:
-                    prefix = "Duel terminé" if mode == "duel" else "Quiz terminé"
+                    prefix = {"duel": "Duel terminé", "solo": "Défi solo terminé"}.get(
+                        mode, "Quiz terminé"
+                    )
                     log(f"\n>>> {prefix} : {end_label} <<<")
                     return True
                 continue
 
             no_question_ticks = 0
             if try_click_next(page):
+                idle_ticks = 0
                 time.sleep(0.8)
             else:
+                idle_ticks += 1
+                if idle_ticks in (10, 30):
+                    log(f"En attente d'une question sur {page.url}...")
                 time.sleep(0.5)
             continue
 
         no_question_ticks = 0
+        idle_ticks = 0
 
         question = question_loc.first.inner_text().strip()
         count = option_locs.count()
@@ -616,21 +695,25 @@ def solve_current_quiz(
             tag = "réponse visée juste" if aim_correct else "erreur volontaire"
             log(f"[{tag} | convergence {tracker['correct']}/{tracker['total']} = {pct:.0f}% (cible {success_rate}%)]")
 
-            for idx in indices:
-                log(f"-> Clic sur [{idx}] {options[idx]}")
-                option_locs.nth(idx).click()
-                time.sleep(0.15)
+            try:
+                for idx in indices:
+                    log(f"-> Clic sur [{idx}] {options[idx]}")
+                    option_locs.nth(idx).click(timeout=4000)
+                    time.sleep(0.1)
 
-            valider = page.get_by_text("Valider", exact=True)
-            if valider.count() > 0:
-                valider.first.click()
-                log("-> Clic sur Valider")
+                valider = page.get_by_text("Valider", exact=True)
+                if valider.count() > 0:
+                    valider.first.click(timeout=4000)
+                    log("-> Clic sur Valider")
 
-            last_signature = signature
+                last_signature = signature
+            except Exception as e:
+                log(f"-> Écran modifié avant validation ({e}), passage à la suite...")
+                try_click_next(page)
         else:
             log("-> Impossible de déterminer la réponse, nouvelle tentative dans 2s.")
 
-        time.sleep(1.2)
+        time.sleep(0.6 if mode == "solo" else 1.2)
 
     log("Partie terminée !")
     return True
@@ -670,13 +753,14 @@ def run_bot(
     headless: bool = False,
     count: int = 1,
     quiz_name: str = "",
+    solo_type: str = "Premier à 10",
     success_rate: int = DEFAULT_SUCCESS_RATE,
     direct_url: str = "",
     app_dir: Path | None = None,
     log=print,
     stop_event: threading.Event | None = None,
 ) -> int:
-    """Exécute la session complète du bot (adventure ou duel) et retourne le nombre de parties."""
+    """Exécute la session complète du bot (adventure, duel ou solo) et retourne le nombre de parties."""
     base_dir = app_dir or get_app_dir()
     profile_dir = base_dir / ".pw_profile"
     profile_dir.mkdir(exist_ok=True)
@@ -700,6 +784,7 @@ def run_bot(
                     effort,
                     mode=mode,
                     quiz_name=quiz_name,
+                    solo_type=solo_type,
                     success_rate=rate,
                     tracker=tracker,
                     log=log,
@@ -714,6 +799,8 @@ def run_bot(
                     log(f"\n--- Lancement ({mode}) {done + 1}{total_label} | Cible réussite: {rate}% ---")
                     if mode == "duel":
                         started = select_and_start_duel(page, log=log)
+                    elif mode == "solo":
+                        started = select_and_start_solo(page, log=log)
                     else:
                         started = select_and_start_adventure(page, quiz_name, log=log)
                     if not started:
@@ -724,6 +811,7 @@ def run_bot(
                         effort,
                         mode=mode,
                         quiz_name=quiz_name,
+                        solo_type=solo_type,
                         success_rate=rate,
                         tracker=tracker,
                         log=log,
@@ -737,6 +825,8 @@ def run_bot(
 
                 if mode == "duel":
                     log(f"\n>>> Duels terminés : {done} duel(s) complété(s). <<<")
+                elif mode == "solo":
+                    log(f"\n>>> Défis solo terminés : {done} défi(s) complété(s). <<<")
                 else:
                     log(f"\nSession terminée : {done} partie(s) complétée(s).")
         finally:
@@ -747,7 +837,8 @@ def run_bot(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bot autonome AgoraQuiz (Playwright + agy CLI)")
-    parser.add_argument("--mode", default="adventure", choices=("adventure", "duel"), help="Mode de jeu")
+    parser.add_argument("--mode", default="adventure", choices=("adventure", "duel", "solo"), help="Mode de jeu")
+    parser.add_argument("--solo-type", default="Premier à 10", help="Type de défi solo")
     parser.add_argument("--url", default="", help="URL directe d'un quiz (optionnel)")
     parser.add_argument("--quiz", default="", help="Nom partiel du thème/quiz à sélectionner")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Modèle agy (défaut: {DEFAULT_MODEL})")
@@ -775,6 +866,7 @@ def main() -> None:
         headless=args.headless,
         count=args.count,
         quiz_name=quiz_target,
+        solo_type=args.solo_type,
         success_rate=args.rate,
         direct_url=args.url,
         app_dir=app_dir,

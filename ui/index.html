@@ -48,6 +48,26 @@
     .badge.running { color: var(--accent); border-color: var(--accent); }
     .badge.done { color: var(--ok); border-color: var(--ok); }
     .badge.error { color: var(--danger); border-color: var(--danger); }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn-update {
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #1f2432;
+      color: var(--text);
+      border: 1px solid var(--border);
+      cursor: pointer;
+    }
+    .btn-update.available {
+      background: #142b1d;
+      color: #86efac;
+      border-color: var(--ok);
+    }
+    .btn-update:disabled { opacity: 0.6; cursor: wait; }
 
     .grid {
       display: grid;
@@ -166,8 +186,11 @@
 </head>
 <body>
   <header>
-    <h1>AgoraQuiz Bot</h1>
-    <span id="statusBadge" class="badge">Prêt</span>
+    <h1>AgoraQuiz Bot <span id="versionTag" class="badge">v1.1.0</span></h1>
+    <div class="header-right">
+      <button id="updateBtn" class="btn-update" onclick="handleUpdateClick()">Vérifier MAJ</button>
+      <span id="statusBadge" class="badge">Prêt</span>
+    </div>
   </header>
 
   <div class="grid">
@@ -183,18 +206,28 @@
       </div>
       <div class="row">
         <label>Mode
-          <select id="modeSelect">
+          <select id="modeSelect" onchange="onModeChange()">
             <option value="adventure" selected>Aventure</option>
             <option value="duel">Duels (Affrontements)</option>
+            <option value="solo">Défis solo</option>
           </select>
         </label>
         <label>Nombre de parties (0 = max)
           <input id="quizCount" type="number" min="0" value="1" />
         </label>
       </div>
-      <label id="quizNameWrap">Thème ciblé (optionnel)
-        <input id="quizName" type="text" placeholder="Ex: Séquence 2, Java..." />
-      </label>
+      <div class="row">
+        <label id="quizNameWrap">Thème ciblé (optionnel)
+          <input id="quizName" type="text" placeholder="Ex: Séquence 2, Java..." />
+        </label>
+        <label id="soloTypeWrap" style="display:none;">Type de défi solo
+          <select id="soloType">
+            <option value="Premier à 10" selected>Premier à 10 bonnes réponses</option>
+            <option value="Contre la montre">Contre la montre</option>
+            <option value="Mode survie">Mode survie</option>
+          </select>
+        </label>
+      </div>
     </div>
 
     <div class="card">
@@ -235,11 +268,17 @@
     let pollTimer = null;
     let groupedModels = [];
     let defaultEffort = "low";
+    let pendingUpdateUrl = "";
 
     function setStatus(state, text) {
       const b = document.getElementById("statusBadge");
       b.className = "badge " + state;
       b.textContent = text;
+    }
+
+    function onModeChange() {
+      const isSolo = document.getElementById("modeSelect").value === "solo";
+      document.getElementById("soloTypeWrap").style.display = isSolo ? "flex" : "none";
     }
 
     function updateEffortOptions() {
@@ -286,9 +325,53 @@
       }
       updateEffortOptions();
 
+      if (data.version) {
+        document.getElementById("versionTag").textContent = "v" + data.version;
+      }
+
       const logs = document.getElementById("logs");
       if (data.agy_status) {
         logs.textContent = data.agy_status + "\nDossier config/session : " + (data.data_dir || "") + "\n";
+      }
+      checkForUpdates(true);
+    }
+
+    async function checkForUpdates(silent = false) {
+      const btn = document.getElementById("updateBtn");
+      btn.disabled = true;
+      btn.textContent = "Vérification...";
+      const res = await window.pywebview.api.check_update();
+      btn.disabled = false;
+      if (res.available && res.download_url) {
+        pendingUpdateUrl = res.download_url;
+        btn.className = "btn-update available";
+        btn.textContent = `Mettre à jour (${res.latest})`;
+      } else {
+        pendingUpdateUrl = "";
+        btn.className = "btn-update";
+        btn.textContent = res.ok ? `À jour (${res.latest})` : "Vérifier MAJ";
+        if (!silent && !res.ok) {
+          document.getElementById("logs").textContent += "Erreur MAJ : " + (res.error || "inconnue") + "\n";
+        }
+      }
+    }
+
+    async function handleUpdateClick() {
+      if (!pendingUpdateUrl) {
+        await checkForUpdates(false);
+        return;
+      }
+      const btn = document.getElementById("updateBtn");
+      btn.disabled = true;
+      btn.textContent = "Téléchargement...";
+      document.getElementById("logs").textContent += "Téléchargement de la mise à jour en cours...\n";
+      const res = await window.pywebview.api.apply_update(pendingUpdateUrl);
+      if (!res.ok) {
+        btn.disabled = false;
+        btn.textContent = "Réessayer MAJ";
+        document.getElementById("logs").textContent += "Erreur mise à jour : " + (res.error || "inconnue") + "\n";
+      } else {
+        document.getElementById("logs").textContent += "Mise à jour prête, redémarrage...\n";
       }
     }
 
@@ -302,6 +385,7 @@
           username: document.getElementById("username").value.trim(),
           password: document.getElementById("password").value,
           mode: document.getElementById("modeSelect").value,
+          solo_type: document.getElementById("soloType").value,
           quiz_name: document.getElementById("quizName").value.trim(),
           model: fullModelId,
           effort: effSel.value || "low",
