@@ -186,7 +186,7 @@
 </head>
 <body>
   <header>
-    <h1>AgoraQuiz Bot <span id="versionTag" class="badge">v1.1.0</span></h1>
+    <h1>AgoraQuiz Bot <span id="versionTag" class="badge">v1.2.0</span></h1>
     <div class="header-right">
       <button id="updateBtn" class="btn-update" onclick="handleUpdateClick()">Vérifier MAJ</button>
       <span id="statusBadge" class="badge">Prêt</span>
@@ -248,6 +248,10 @@
       <label class="toggle">
         <span>Afficher la fenêtre Chromium</span>
         <input id="showBrowser" type="checkbox" checked />
+      </label>
+      <label class="toggle">
+        <span>Discussions éphémères (supprimer de agy)</span>
+        <input id="ephemeralChat" type="checkbox" checked />
       </label>
     </div>
   </div>
@@ -391,6 +395,7 @@
           effort: effSel.value || "low",
           success_rate: parseInt(document.getElementById("successRate").value || "80", 10),
           show_browser: document.getElementById("showBrowser").checked,
+          ephemeral: document.getElementById("ephemeralChat").checked,
           count: parseInt(document.getElementById("quizCount").value || "1", 10),
         };
 

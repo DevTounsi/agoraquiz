@@ -6,6 +6,7 @@ from pathlib import Path
 import random
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -19,7 +20,7 @@ if getattr(sys, "frozen", False) and "PLAYWRIGHT_BROWSERS_PATH" not in os.enviro
 from playwright.sync_api import sync_playwright
 
 BASE_URL = "https://play.agoraquiz.education"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 GITHUB_REPO = "DevTounsi/agoraquiz"
 DEFAULT_BASE_MODEL = "gemini-4-hydrogen"
 DEFAULT_MODEL = "gemini-4-hydrogen-low"
@@ -458,12 +459,52 @@ def get_expected_count(page) -> int:
     return 1
 
 
+def cleanup_agy_conversation(conversation_id: str) -> None:
+    """Supprime la conversation éphémère créée par `agy -p` du stockage local."""
+    if not conversation_id or not re.fullmatch(r"[0-9a-fA-F-]+", conversation_id):
+        return
+
+    cli_dir = Path(
+        os.environ.get("ANTIGRAVITY_CLI_DATA_DIR")
+        or (Path.home() / ".gemini" / "antigravity-cli")
+    )
+    if not cli_dir.exists():
+        return
+
+    shutil.rmtree(cli_dir / "brain" / conversation_id, ignore_errors=True)
+    for rel in (
+        f"conversations/{conversation_id}.db",
+        f"conversations/{conversation_id}.db-wal",
+        f"conversations/{conversation_id}.db-shm",
+        f"presence/{conversation_id}.lock",
+    ):
+        try:
+            (cli_dir / rel).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    db_path = cli_dir / "conversation_summaries.db"
+    if db_path.exists():
+        try:
+            con = sqlite3.connect(db_path, timeout=3)
+            for table in ("conversation_summaries", "conversation_parents", "conversations_fts"):
+                try:
+                    con.execute(f"DELETE FROM {table} WHERE conversation_id = ?", (conversation_id,))
+                except Exception:
+                    pass
+            con.commit()
+            con.close()
+        except Exception:
+            pass
+
+
 def ask_agy(
     question: str,
     options: list[str],
     expected_count: int,
     model: str,
     effort: str,
+    ephemeral: bool = True,
     log=print,
 ) -> list[int]:
     """Envoie la question et les propositions à agy et retourne les index choisis."""
@@ -491,7 +532,16 @@ def ask_agy(
         log("Erreur : 'agy' est introuvable. Installez agy CLI et connectez-vous.")
         return []
 
-    cmd = [agy_bin, "-p", prompt, "--model", model, "--disable-slash-commands"]
+    cmd = [
+        agy_bin,
+        "-p",
+        prompt,
+        "--model",
+        model,
+        "--output-format",
+        "json",
+        "--disable-slash-commands",
+    ]
     if effort and effort != "default":
         cmd.extend(["--effort", effort])
 
@@ -514,7 +564,21 @@ def ask_agy(
         log(f"Erreur agy : {result.stderr.strip()}")
         return []
 
-    output = result.stdout.strip()
+    raw_out = result.stdout.strip()
+    output = raw_out
+    conv_id = ""
+    try:
+        data = json.loads(raw_out)
+        if isinstance(data, dict):
+            conv_id = str(data.get("conversation_id", ""))
+            if "response" in data:
+                output = str(data["response"]).strip()
+    except Exception:
+        pass
+
+    if ephemeral and conv_id:
+        cleanup_agy_conversation(conv_id)
+
     indices = []
     for m in re.findall(r"\b(\d+)\b", output):
         idx = int(m)
@@ -612,6 +676,7 @@ def solve_current_quiz(
     quiz_name: str = "",
     solo_type: str = "Premier à 10",
     success_rate: int = DEFAULT_SUCCESS_RATE,
+    ephemeral: bool = True,
     tracker: dict | None = None,
     log=print,
     stop_event: threading.Event | None = None,
@@ -682,7 +747,9 @@ def solve_current_quiz(
         for i, opt in enumerate(options):
             log(f"  [{i}] {opt}")
 
-        good_indices = ask_agy(question, options, expected_count, model, effort, log=log)
+        good_indices = ask_agy(
+            question, options, expected_count, model, effort, ephemeral=ephemeral, log=log
+        )
         if good_indices:
             aim_correct = should_answer_correctly(tracker, success_rate)
             if aim_correct:
@@ -755,6 +822,7 @@ def run_bot(
     quiz_name: str = "",
     solo_type: str = "Premier à 10",
     success_rate: int = DEFAULT_SUCCESS_RATE,
+    ephemeral: bool = True,
     direct_url: str = "",
     app_dir: Path | None = None,
     log=print,
@@ -786,6 +854,7 @@ def run_bot(
                     quiz_name=quiz_name,
                     solo_type=solo_type,
                     success_rate=rate,
+                    ephemeral=ephemeral,
                     tracker=tracker,
                     log=log,
                     stop_event=stop_event,
@@ -813,6 +882,7 @@ def run_bot(
                         quiz_name=quiz_name,
                         solo_type=solo_type,
                         success_rate=rate,
+                        ephemeral=ephemeral,
                         tracker=tracker,
                         log=log,
                         stop_event=stop_event,
@@ -851,6 +921,11 @@ def main() -> None:
         default=DEFAULT_SUCCESS_RATE,
         help=f"Taux de convergence de réussite en %% (0-100, défaut: {DEFAULT_SUCCESS_RATE})",
     )
+    parser.add_argument(
+        "--keep-history",
+        action="store_true",
+        help="Conserver les discussions dans agy (sinon supprimées après chaque réponse)",
+    )
     args = parser.parse_args()
 
     app_dir = get_app_dir()
@@ -868,6 +943,7 @@ def main() -> None:
         quiz_name=quiz_target,
         solo_type=args.solo_type,
         success_rate=args.rate,
+        ephemeral=not args.keep_history,
         direct_url=args.url,
         app_dir=app_dir,
     )

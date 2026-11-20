@@ -196,6 +196,7 @@ class BotApi:
                     quiz_name=cfg["quiz_name"],
                     solo_type=opts.get("solo_type", "Premier à 10"),
                     success_rate=int(opts.get("success_rate", DEFAULT_SUCCESS_RATE)),
+                    ephemeral=bool(opts.get("ephemeral", True)),
                     app_dir=self.app_dir,
                     log=self._log,
                     stop_event=self._stop_event,
