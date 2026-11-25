@@ -107,6 +107,7 @@
       outline: none;
     }
     input:focus, select:focus { border-color: var(--accent); }
+    input:disabled, select:disabled { opacity: 0.5; cursor: not-allowed; }
 
     .row {
       display: flex;
@@ -186,7 +187,7 @@
 </head>
 <body>
   <header>
-    <h1>AgoraQuiz Bot <span id="versionTag" class="badge">v1.2.0</span></h1>
+    <h1>AgoraQuiz Bot <span id="versionTag" class="badge">v1.3.0</span></h1>
     <div class="header-right">
       <button id="updateBtn" class="btn-update" onclick="handleUpdateClick()">Vérifier MAJ</button>
       <span id="statusBadge" class="badge">Prêt</span>
@@ -207,6 +208,7 @@
       <div class="row">
         <label>Mode
           <select id="modeSelect" onchange="onModeChange()">
+            <option value="all">Tous les modes (tous les tickets)</option>
             <option value="adventure" selected>Aventure</option>
             <option value="duel">Duels (Affrontements)</option>
             <option value="solo">Défis solo</option>
@@ -247,7 +249,7 @@
       </label>
       <label class="toggle">
         <span>Afficher la fenêtre Chromium</span>
-        <input id="showBrowser" type="checkbox" checked />
+        <input id="showBrowser" type="checkbox" />
       </label>
       <label class="toggle">
         <span>Discussions éphémères (supprimer de agy)</span>
@@ -280,9 +282,24 @@
       b.textContent = text;
     }
 
+    let lastSingleModeCount = "1";
+
     function onModeChange() {
-      const isSolo = document.getElementById("modeSelect").value === "solo";
-      document.getElementById("soloTypeWrap").style.display = isSolo ? "flex" : "none";
+      const mode = document.getElementById("modeSelect").value;
+      const showSolo = mode === "solo" || mode === "all";
+      document.getElementById("soloTypeWrap").style.display = showSolo ? "flex" : "none";
+
+      const countInput = document.getElementById("quizCount");
+      if (mode === "all") {
+        if (!countInput.disabled) {
+          lastSingleModeCount = countInput.value || "1";
+        }
+        countInput.value = "0";
+        countInput.disabled = true;
+      } else if (countInput.disabled) {
+        countInput.disabled = false;
+        countInput.value = lastSingleModeCount || "1";
+      }
     }
 
     function updateEffortOptions() {

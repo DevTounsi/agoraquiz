@@ -20,8 +20,13 @@ if getattr(sys, "frozen", False) and "PLAYWRIGHT_BROWSERS_PATH" not in os.enviro
 from playwright.sync_api import sync_playwright
 
 BASE_URL = "https://play.agoraquiz.education"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 GITHUB_REPO = "DevTounsi/agoraquiz"
+ALL_MODES = (
+    ("adventure", "Aventure"),
+    ("duel", "Affrontements"),
+    ("solo", "Défis solo"),
+)
 DEFAULT_BASE_MODEL = "gemini-4-hydrogen"
 DEFAULT_MODEL = "gemini-4-hydrogen-low"
 DEFAULT_EFFORT = "low"
@@ -197,6 +202,58 @@ def fetch_grouped_models() -> tuple[list[dict], str]:
     return result, status_msg
 
 
+def safe_click(locator, timeout: int = 5000) -> None:
+    """Clique sur un élément en tolérant les éléments bloqués hors du viewport (ex: popovers absolus)."""
+    locator.wait_for(state="visible", timeout=timeout)
+    try:
+        locator.scroll_into_view_if_needed(timeout=min(timeout, 2000))
+    except Exception:
+        pass
+
+    in_viewport = True
+    try:
+        in_viewport = bool(
+            locator.evaluate(
+                """el => {
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return false;
+                    const cx = r.left + r.width / 2;
+                    const cy = r.top + r.height / 2;
+                    return cx >= 0 && cx <= window.innerWidth && cy >= 0 && cy <= window.innerHeight;
+                }""",
+                timeout=1500,
+            )
+        )
+    except Exception:
+        in_viewport = True
+
+    if in_viewport:
+        try:
+            locator.click(timeout=timeout)
+            return
+        except Exception as e:
+            msg = str(e)
+            if not (
+                "outside of the viewport" in msg
+                or "intercepts pointer events" in msg
+                or "Timeout" in msg
+            ):
+                raise
+
+    clicked = locator.evaluate(
+        """el => {
+            if (!el.isConnected) return false;
+            const target = el.closest('button, [role="button"]') || el;
+            if (target.disabled || target.getAttribute('aria-disabled') === 'true') return false;
+            el.click();
+            return true;
+        }""",
+        timeout=1500,
+    )
+    if not clicked:
+        raise RuntimeError("Impossible de cliquer sur l'élément (détaché ou désactivé).")
+
+
 def ensure_on_play_home(page, log=print) -> None:
     """Force la navigation vers la page d'accueil des modes (/play)."""
     if page.url.rstrip("/") != f"{BASE_URL}/play":
@@ -215,7 +272,7 @@ def ensure_logged_in(page, username: str, password: str, log=print) -> None:
         page.wait_for_selector("input", timeout=15000)
         page.get_by_placeholder("Identifiant").fill(username)
         page.get_by_placeholder("Mot de passe").fill(password)
-        page.get_by_role("button", name="Se connecter").click()
+        safe_click(page.get_by_role("button", name="Se connecter"), timeout=10000)
 
         for _ in range(30):
             if "/auth" not in page.url:
@@ -233,24 +290,33 @@ def ensure_logged_in(page, username: str, password: str, log=print) -> None:
         page.wait_for_timeout(2500)
 
 
-def log_ticket_status(page, log=print) -> None:
-    """Affiche les compteurs de tickets lus sur /play s'ils sont visibles."""
+def read_ticket_counts(page) -> dict[str, int]:
+    """Lit les compteurs de tickets visibles sur /play (clés: adventure, duel, solo)."""
+    counts: dict[str, int] = {}
     try:
         text = page.locator("body").inner_text(timeout=1000)
     except Exception:
-        return
-    adv = re.search(r"Tickets aventure\s*:\s*(\d+)", text, re.IGNORECASE)
-    duel = re.search(r"Tickets affrontements\s*:\s*(\d+)", text, re.IGNORECASE)
-    solo = re.search(r"Tickets défis solo\s*:\s*(\d+)", text, re.IGNORECASE)
-    if adv or duel or solo:
-        parts = []
-        if adv:
-            parts.append(f"Aventure: {adv.group(1)}")
-        if duel:
-            parts.append(f"Affrontements: {duel.group(1)}")
-        if solo:
-            parts.append(f"Solo: {solo.group(1)}")
+        return counts
+    patterns = (
+        ("adventure", r"Tickets aventure\s*:\s*(\d+)"),
+        ("duel", r"Tickets affrontements\s*:\s*(\d+)"),
+        ("solo", r"Tickets défis solo\s*:\s*(\d+)"),
+    )
+    for key, pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            counts[key] = int(match.group(1))
+    return counts
+
+
+def log_ticket_status(page, log=print) -> dict[str, int]:
+    """Affiche les compteurs de tickets lus sur /play s'ils sont visibles."""
+    counts = read_ticket_counts(page)
+    if counts:
+        labels = (("adventure", "Aventure"), ("duel", "Affrontements"), ("solo", "Solo"))
+        parts = [f"{label}: {counts[key]}" for key, label in labels if key in counts]
         log("Tickets disponibles -> " + " | ".join(parts))
+    return counts
 
 
 def should_answer_correctly(tracker: dict, target_rate: int) -> bool:
@@ -296,11 +362,11 @@ def select_and_start_adventure(page, quiz_name: str = "", log=print) -> bool:
     if "/play/adventure" not in page.url:
         ensure_on_play_home(page, log=log)
         log("Ouverture du mode Aventure...")
-        page.get_by_text("Aventure", exact=True).first.click(timeout=15000)
+        safe_click(page.get_by_text("Aventure", exact=True).first, timeout=15000)
         page.wait_for_timeout(2500)
 
     result = page.evaluate(
-        """(targetName) => {
+        """async (targetName) => {
             const badges = Array.from(document.querySelectorAll('div')).filter(
                 d => d.children.length === 0 &&
                      (d.innerText.trim().toUpperCase() === 'CONTINUER' ||
@@ -330,6 +396,8 @@ def select_and_start_adventure(page, quiz_name: str = "", log=print) -> bool:
             const container = chosen.closest('.relative');
             const btn = container ? container.querySelector('div[tabindex="0"]') : null;
             if (!btn) return { ok: false, reason: 'NO_BUTTON' };
+            btn.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+            await new Promise(resolve => setTimeout(resolve, 250));
             btn.click();
             return { ok: true, badge: chosen.innerText.trim() };
         }""",
@@ -359,7 +427,7 @@ def select_and_start_adventure(page, quiz_name: str = "", log=print) -> bool:
         log("Le bouton 'Commencer' est désactivé (plus de tickets aventure ?).")
         return False
 
-    start_btn.click()
+    safe_click(start_btn, timeout=5000)
     for _ in range(20):
         if "/adventure-game/" in page.url:
             break
@@ -374,25 +442,29 @@ def select_and_start_duel(page, log=print) -> bool:
     if "/play/battle" not in page.url:
         ensure_on_play_home(page, log=log)
         log("Ouverture du mode Affrontements (Duels)...")
-        page.get_by_text("Affrontements", exact=True).first.click(timeout=15000)
+        safe_click(page.get_by_text("Affrontements", exact=True).first, timeout=15000)
         page.wait_for_timeout(2500)
 
-    # 1. Vérifier s'il y a déjà un duel en cours jouable (Jouer / Continuer)
-    for label in ("Jouer", "Continuer", "À ton tour"):
+    # 1. Vérifier s'il y a déjà un duel en cours jouable (Jouer / Continuer / Reprendre)
+    for label in ("Jouer", "Continuer", "À ton tour", "Reprendre"):
         btn = page.locator("button", has_text=label)
         if btn.count() > 0 and btn.first.is_visible() and not btn.first.is_disabled():
             log(f"Duel en cours trouvé ({label}), reprise...")
-            btn.first.click()
+            safe_click(btn.first, timeout=5000)
             break
     else:
         # 2. Sinon lancer un nouvel affrontement
         find_btn = page.locator("button", has_text="Trouver un adversaire").first
-        find_btn.wait_for(state="visible", timeout=10000)
+        try:
+            find_btn.wait_for(state="visible", timeout=10000)
+        except Exception:
+            log("Bouton 'Trouver un adversaire' introuvable (mode verrouillé ou indisponible).")
+            return False
         if find_btn.is_disabled():
             log("Bouton 'Trouver un adversaire' désactivé (plus de tickets affrontements ?).")
             return False
         log("Recherche d'un adversaire...")
-        find_btn.click()
+        safe_click(find_btn, timeout=5000)
 
     for _ in range(30):
         if "/play/battle" not in page.url:
@@ -412,17 +484,26 @@ def select_and_start_solo(page, log=print) -> bool:
     if "/play/solo" not in page.url:
         ensure_on_play_home(page, log=log)
         log("Ouverture du mode Défis solo...")
-        page.get_by_text("Défis solo", exact=True).first.click(timeout=15000)
+        safe_click(page.get_by_text("Défis solo", exact=True).first, timeout=15000)
         page.wait_for_timeout(2500)
 
-    start_btn = page.locator("button", has_text="Lancer un défi solo").first
-    start_btn.wait_for(state="visible", timeout=10000)
-    if start_btn.is_disabled():
-        log("Bouton 'Lancer un défi solo' désactivé (plus de tickets défis solo ?).")
-        return False
+    resume_btn = page.locator("button", has_text="Reprendre")
+    if resume_btn.count() > 0 and resume_btn.first.is_visible() and not resume_btn.first.is_disabled():
+        log("Défi solo en cours trouvé (Reprendre), reprise...")
+        safe_click(resume_btn.first, timeout=5000)
+    else:
+        start_btn = page.locator("button", has_text="Lancer un défi solo").first
+        try:
+            start_btn.wait_for(state="visible", timeout=10000)
+        except Exception:
+            log("Bouton 'Lancer un défi solo' introuvable (mode verrouillé ou indisponible).")
+            return False
+        if start_btn.is_disabled():
+            log("Bouton 'Lancer un défi solo' désactivé (plus de tickets défis solo ?).")
+            return False
 
-    log("Lancement du défi solo...")
-    start_btn.click()
+        log("Lancement du défi solo...")
+        safe_click(start_btn, timeout=5000)
 
     for _ in range(30):
         if "/solo-game/" in page.url:
@@ -598,7 +679,7 @@ def try_click_next(page) -> bool:
         locator = page.get_by_text(label, exact=True)
         try:
             if locator.count() > 0 and locator.first.is_visible():
-                locator.first.click()
+                safe_click(locator.first, timeout=3000)
                 return True
         except Exception:
             pass
@@ -644,7 +725,7 @@ def handle_pregame_choice(
                     break
         theme_text = option_locs.nth(chosen_idx).inner_text().strip()
         log(f"Sélection du thème : {theme_text}")
-        option_locs.nth(chosen_idx).click()
+        safe_click(option_locs.nth(chosen_idx), timeout=5000)
         time.sleep(0.4)
         try_click_next(page)
         time.sleep(1.0)
@@ -659,7 +740,7 @@ def handle_pregame_choice(
                 break
         mode_text = option_locs.nth(chosen_idx).inner_text().strip()
         log(f"Sélection du défi solo : {mode_text}")
-        option_locs.nth(chosen_idx).click()
+        safe_click(option_locs.nth(chosen_idx), timeout=5000)
         time.sleep(0.4)
         try_click_next(page)
         time.sleep(1.0)
@@ -765,12 +846,12 @@ def solve_current_quiz(
             try:
                 for idx in indices:
                     log(f"-> Clic sur [{idx}] {options[idx]}")
-                    option_locs.nth(idx).click(timeout=4000)
+                    safe_click(option_locs.nth(idx), timeout=4000)
                     time.sleep(0.1)
 
                 valider = page.get_by_text("Valider", exact=True)
                 if valider.count() > 0:
-                    valider.first.click(timeout=4000)
+                    safe_click(valider.first, timeout=4000)
                     log("-> Clic sur Valider")
 
                 last_signature = signature
@@ -811,13 +892,22 @@ def launch_browser_context(p, profile_dir: Path, headless: bool, log=print):
         ) from e
 
 
+def start_mode_game(page, mode: str, quiz_name: str = "", log=print) -> bool:
+    """Lance une partie dans le mode donné (adventure, duel ou solo)."""
+    if mode == "duel":
+        return select_and_start_duel(page, log=log)
+    if mode == "solo":
+        return select_and_start_solo(page, log=log)
+    return select_and_start_adventure(page, quiz_name, log=log)
+
+
 def run_bot(
     username: str,
     password: str,
     mode: str = "adventure",
     model: str = DEFAULT_MODEL,
     effort: str = DEFAULT_EFFORT,
-    headless: bool = False,
+    headless: bool = True,
     count: int = 1,
     quiz_name: str = "",
     solo_type: str = "Premier à 10",
@@ -828,7 +918,7 @@ def run_bot(
     log=print,
     stop_event: threading.Event | None = None,
 ) -> int:
-    """Exécute la session complète du bot (adventure, duel ou solo) et retourne le nombre de parties."""
+    """Exécute la session complète du bot (adventure, duel, solo ou all) et retourne le nombre de parties."""
     base_dir = app_dir or get_app_dir()
     profile_dir = base_dir / ".pw_profile"
     profile_dir.mkdir(exist_ok=True)
@@ -860,18 +950,70 @@ def run_bot(
                     stop_event=stop_event,
                 ):
                     done = 1
+            elif mode == "all":
+                per_mode_done = {m: 0 for m, _ in ALL_MODES}
+                stopped = False
+                for sub_mode, label in ALL_MODES:
+                    if stop_event and stop_event.is_set():
+                        stopped = True
+                        break
+                    log(f"\n========== Mode : {label} (tous les tickets) ==========")
+                    ensure_on_play_home(page, log=log)
+                    tickets = read_ticket_counts(page)
+                    if sub_mode == "adventure" and tickets.get("adventure") == 0:
+                        log("Aventure : 0 ticket disponible, passage au mode suivant.")
+                        continue
+
+                    while True:
+                        if stop_event and stop_event.is_set():
+                            stopped = True
+                            break
+                        log(
+                            f"\n--- Lancement ({label}) #{per_mode_done[sub_mode] + 1} | Cible réussite: {rate}% ---"
+                        )
+                        try:
+                            started = start_mode_game(page, sub_mode, quiz_name=quiz_name, log=log)
+                        except Exception as e:
+                            log(f"Erreur lors du lancement ({label}) : {e} — passage au mode suivant.")
+                            break
+                        if not started:
+                            break
+                        completed = solve_current_quiz(
+                            page,
+                            model,
+                            effort,
+                            mode=sub_mode,
+                            quiz_name=quiz_name,
+                            solo_type=solo_type,
+                            success_rate=rate,
+                            ephemeral=ephemeral,
+                            tracker=tracker,
+                            log=log,
+                            stop_event=stop_event,
+                        )
+                        if not completed:
+                            stopped = True
+                            break
+                        per_mode_done[sub_mode] += 1
+                        done += 1
+                        page.wait_for_timeout(2000)
+
+                    if stopped:
+                        break
+
+                log(
+                    f"\n>>> Tous les modes terminés : {done} partie(s) "
+                    f"(Aventure: {per_mode_done['adventure']}, "
+                    f"Duels: {per_mode_done['duel']}, "
+                    f"Solo: {per_mode_done['solo']}). <<<"
+                )
             else:
                 while count == 0 or done < count:
                     if stop_event and stop_event.is_set():
                         break
                     total_label = f"/{count}" if count else ""
                     log(f"\n--- Lancement ({mode}) {done + 1}{total_label} | Cible réussite: {rate}% ---")
-                    if mode == "duel":
-                        started = select_and_start_duel(page, log=log)
-                    elif mode == "solo":
-                        started = select_and_start_solo(page, log=log)
-                    else:
-                        started = select_and_start_adventure(page, quiz_name, log=log)
+                    started = start_mode_game(page, mode, quiz_name=quiz_name, log=log)
                     if not started:
                         break
                     completed = solve_current_quiz(
@@ -907,13 +1049,19 @@ def run_bot(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bot autonome AgoraQuiz (Playwright + agy CLI)")
-    parser.add_argument("--mode", default="adventure", choices=("adventure", "duel", "solo"), help="Mode de jeu")
+    parser.add_argument(
+        "--mode",
+        default="adventure",
+        choices=("adventure", "duel", "solo", "all"),
+        help="Mode de jeu (all = tous les tickets, tous modes confondus)",
+    )
     parser.add_argument("--solo-type", default="Premier à 10", help="Type de défi solo")
     parser.add_argument("--url", default="", help="URL directe d'un quiz (optionnel)")
     parser.add_argument("--quiz", default="", help="Nom partiel du thème/quiz à sélectionner")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Modèle agy (défaut: {DEFAULT_MODEL})")
     parser.add_argument("--effort", default=DEFAULT_EFFORT, help="Effort de raisonnement")
-    parser.add_argument("--headless", action="store_true", help="Exécuter sans fenêtre visible")
+    parser.add_argument("--headless", action="store_true", help="Exécuter sans fenêtre visible (défaut)")
+    parser.add_argument("--show-browser", action="store_true", help="Afficher la fenêtre du navigateur")
     parser.add_argument("--count", type=int, default=1, help="Nombre de parties à faire (0 = illimité)")
     parser.add_argument(
         "--rate",
@@ -938,7 +1086,7 @@ def main() -> None:
         mode=args.mode,
         model=args.model,
         effort=args.effort,
-        headless=args.headless,
+        headless=not args.show_browser,
         count=args.count,
         quiz_name=quiz_target,
         solo_type=args.solo_type,

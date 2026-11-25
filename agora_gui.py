@@ -191,7 +191,7 @@ class BotApi:
                     mode=opts.get("mode", "adventure"),
                     model=opts.get("model", DEFAULT_MODEL),
                     effort=opts.get("effort", DEFAULT_EFFORT),
-                    headless=not bool(opts.get("show_browser", True)),
+                    headless=not bool(opts.get("show_browser", False)),
                     count=max(0, int(opts.get("count", 1))),
                     quiz_name=cfg["quiz_name"],
                     solo_type=opts.get("solo_type", "Premier à 10"),
